@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>moderaction demo</title>
+  </head>
+  <body>
+    <h1>moderaction demo (IIFE)</h1>
+    <p>Open the console. This only demonstrates the API; endpoints will 404 outside a Forumactif context.</p>
+    <script src="../dist/moderaction.iife.js"></script>
+    <script>
+      console.log('Moderaction available?', !!window.Moderaction);
+      // Example usage (will not work outside Forumactif):
+      // Moderaction.topics.lock([123,456]).then(console.log).catch(console.error);
+    </script>
+  </body>
+</html>
