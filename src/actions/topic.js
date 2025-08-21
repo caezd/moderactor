@@ -63,7 +63,7 @@ export default class TopicResource extends BaseResource {
         return this._all(tasks);
     }
 
-    async remove() {
+    async delete() {
         const tid = this.adapter.tid;
         if (!tid) throw new Error("Topic.remove: tid introuvable");
         const tasks = this.ids.map((t) =>

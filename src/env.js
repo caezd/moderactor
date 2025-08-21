@@ -1,16 +1,38 @@
 import { state } from "./core/state.js";
+import { getCookie } from "./core/utils.js";
 
 export async function env(url) {
+    console.log(
+        "fa_" + location.host.replace(/\./g, "_") + "_data",
+        getCookie("fa_" + location.host.replace(/\./g, "_") + "_data"),
+        parseInt(getCookie("fa_" + location.host.replace(/\./g, "_") + "_data"))
+    );
+    const user_id = parseInt(
+        ((
+            getCookie("fa_" + location.host.replace(/\./g, "_") + "_data") || ""
+        ).match(/"userid";(?:s:[0-9]+:"|i:)([0-9]+)/) || [0, -1])[1]
+    );
+
+    const _ud = _userdata || {};
+
     // Si pas d'URL : on retourne l'env courant (basé sur state)
     if (!url) {
+        const u = location;
+        const hash = u.hash ? u.hash.substring(1) : null;
+
         return {
             url: location.href,
-            tid: state.tid,
-            pagetype: state.pagetype,
-            resid: state.resid,
-            pagenum: state.pagenum,
+            t_id: state.tid,
+            page_type: state.pagetype,
+            res_id: state.resid,
+            page_num: state.pagenum,
             charset: state.charset,
-            anchorId: location.hash ? location.hash.substring(1) : null,
+            anchor_id: hash,
+            user_id,
+            is_guest: user_id == -1,
+            is_admin: _ud["user_level"] == 1,
+            is_mod: _ud["user_level"] > 0,
+            lang: _ud["user_lang"],
         };
     }
 
@@ -30,26 +52,31 @@ export async function env(url) {
 
     return {
         url,
-        tid:
+        t_id:
             doc.querySelector("input[name=tid]")?.value ||
             (mTid ? mTid[1] : null) ||
             (mFid ? mFid[1] : null),
-        pagetype: (() => {
+        page_type: (() => {
             if (/^\/t\d+(p\d+)?-/.test(pathname)) return "topic";
             if (/^\/f\d+(p\d+)?-/.test(pathname)) return "forum";
             if (/^\/c\d+-/.test(pathname)) return "category";
             return "";
         })(),
-        resid: (() => {
+        res_id: (() => {
             let m = pathname.match(/^\/[tfc](\d+)(?:p\d+)?-/);
             if (!m) m = pathname.match(/^\/u(\d+)/);
             return m ? Number(m[1]) : 0;
         })(),
-        pagenum: (() => {
+        page_num: (() => {
             const m = pathname.match(/^\/[tf]\d+(p\d+)-/);
             return m ? Number(m[1].slice(1)) : 0;
         })(),
         charset: (doc.characterSet || "utf-8").toLowerCase(),
-        anchorId: hash,
+        anchor_id: hash,
+        user_id,
+        is_guest: user_id == -1,
+        is_admin: _ud["user_level"] == 1,
+        is_mod: _ud["user_level"] > 0,
+        lang: _ud["user_lang"],
     };
 }

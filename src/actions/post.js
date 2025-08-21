@@ -1,7 +1,7 @@
 import { BaseResource } from "./_base.js";
 
 export default class PostResource extends BaseResource {
-    async remove() {
+    async delete() {
         const tasks = this.ids.map((p) =>
             this.adapter
                 .post("/post", { p, mode: "delete", confirm: "" })
@@ -10,8 +10,8 @@ export default class PostResource extends BaseResource {
         return this._all(tasks);
     }
 
-    async change({ message }) {
-        if (!message) throw new Error("Post.change: message requis");
+    async update({ message }) {
+        if (!message) throw new Error("Post.update: message requis");
         const tasks = this.ids.map(async (p) => {
             const form = await this.adapter.getForm(
                 `/post?p=${p}&mode=editpost`,
