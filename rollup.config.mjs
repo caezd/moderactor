@@ -1,6 +1,5 @@
 import resolve from "@rollup/plugin-node-resolve";
 import commonjs from "@rollup/plugin-commonjs";
-import typescript from "@rollup/plugin-typescript";
 import { terser } from "rollup-plugin-terser";
 
 export default [
@@ -8,12 +7,12 @@ export default [
         input: "src/index.js",
         output: [
             {
-                file: "dist/moderaction.esm.js",
+                file: "dist/moderactor.esm.js",
                 format: "esm",
                 sourcemap: true,
             },
             {
-                file: "dist/moderaction.iife.js",
+                file: "dist/moderactor.js",
                 format: "iife",
                 name: "Moderaction",
                 sourcemap: true,

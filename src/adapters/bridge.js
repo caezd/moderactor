@@ -1,100 +1,22 @@
+// ──────────────────────────────────────────────────────────────────────────────
+// File: src/adapters/phpbb3/bridge.js
+// ──────────────────────────────────────────────────────────────────────────────
+// Bridge pour Forumactif : parse les pages de confirmation/erreur
+
+function first(el, sel) {
+    return el.querySelector(sel) || undefined;
+}
 function all(el, sel) {
     return Array.from(el.querySelectorAll(sel));
 }
 
-// Collecte tous les nœuds texte visibles (hors <script/style/...>)
-function collectTextNodes(root) {
-    const out = [];
-    const skip = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "IFRAME"]);
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-        acceptNode(node) {
-            const parent = node.parentElement;
-            if (!parent || skip.has(parent.tagName))
-                return NodeFilter.FILTER_REJECT;
-            const txt = node.nodeValue || "";
-            if (!txt.trim()) return NodeFilter.FILTER_SKIP;
-            return NodeFilter.FILTER_ACCEPT;
-        },
-    });
-    let n;
-    while ((n = walker.nextNode())) out.push(n.nodeValue);
-    return out;
-}
-
-function normalize(s) {
-    return (s || "").replace(/\s+/g, " ").trim();
-}
-function lower(s) {
-    return normalize(s).toLowerCase();
-}
-
-// Essaie d'extraire la phrase contenant un mot-clé connu (FR/EN)
-function extractSentenceAround(text, needles) {
-    const t = " " + normalize(text) + " ";
-    const idx = needles
-        .map((n) => t.indexOf(n))
-        .filter((i) => i >= 0)
-        .sort((a, b) => a - b)[0];
-    if (idx === undefined) return "";
-    // bornes de phrase (., !, ?, \n)
-    const left = Math.max(
-        0,
-        t.lastIndexOf(".", idx) + 1,
-        t.lastIndexOf("!", idx) + 1,
-        t.lastIndexOf("?", idx) + 1,
-        t.lastIndexOf("\n", idx) + 1
+function extractMessage(doc) {
+    // Récupère tous les <p> et concatène leurs textes
+    const ps = Array.from(doc.querySelectorAll("p")).map((p) =>
+        p.textContent.trim()
     );
-    let right = t.indexOf(".", idx);
-    if (right === -1) right = t.length;
-    const s = t.slice(left, right).trim();
-    return s || t.trim();
-}
-
-// Dictionnaires d’action ↔ mots‑clés (FR/EN)
-const ACTION_KEYWORDS = {
-    "topic.move": ["déplac", "moved"],
-    "topic.lock": ["verrouill", "locked"],
-    "topic.unlock": ["déverrouill", "unlocked"],
-    "topic.delete": ["supprim", "deleted", "removed"],
-    "topic.trash": ["corbeille", "poubelle", "trash"],
-    "topic.post": ["répon", "posted", "reply"],
-    "forum.post": [
-        "nouveau sujet",
-        "sujet a été créé",
-        "topic has been created",
-        "new topic",
-    ],
-    "user.pm": ["message priv", "private message"],
-    "user.ban": ["banni", "banned"],
-    "user.unban": ["débanni", "unbann"],
-};
-
-const ERROR_KEYWORDS = [
-    "aucun",
-    "erreur",
-    "error",
-    "forbidden",
-    "not allowed",
-    "non autorisé",
-    "permission",
-];
-
-// Déduction d’action à partir du texte global
-function inferActionFromText(text) {
-    const t = lower(text);
-    for (const [action, keys] of Object.entries(ACTION_KEYWORDS)) {
-        if (keys.some((k) => t.includes(k))) return action;
-    }
-    return "unknown";
-}
-
-// Succès si (action détectée) ∧ (au moins un mot‑clé de succès présent) ∧ (aucun mot‑clé d’erreur)
-function validateOk(action, message) {
-    const keys = ACTION_KEYWORDS[action] || [];
-    const msg = lower(message);
-    const hasSuccess = keys.some((k) => msg.includes(k));
-    const hasError = ERROR_KEYWORDS.some((k) => msg.includes(k));
-    return hasSuccess && !hasError;
+    const text = ps.join(" ").replace(/\s+/g, " ").trim();
+    return text;
 }
 
 function parseIdsFromHref(href) {
@@ -109,68 +31,60 @@ function parseIdsFromHref(href) {
     return ids;
 }
 
-function parseAllIds(doc) {
-    const out = {
-        topic_id: undefined,
-        forum_id: undefined,
-        post_id: undefined,
-    };
-    for (const a of all(doc, "a[href]")) {
-        const ids = parseIdsFromHref(a.getAttribute("href") || "");
-        if (out.topic_id === undefined && ids.topic_id !== undefined)
-            out.topic_id = ids.topic_id;
-        if (out.forum_id === undefined && ids.forum_id !== undefined)
-            out.forum_id = ids.forum_id;
-        if (out.post_id === undefined && ids.post_id !== undefined)
-            out.post_id = ids.post_id;
-    }
-    return out;
+function inferAction(message) {
+    const lower = (message || "").toLowerCase();
+    if (/déplacé/.test(lower)) return "topic.move";
+    if (/verrouill/.test(lower) && !/déverrouill/.test(lower))
+        return "topic.lock";
+    if (/déverrouill/.test(lower)) return "topic.unlock";
+    if (/supprim/.test(lower)) return "topic.delete";
+    if (/corbeille|poubelle/.test(lower)) return "topic.trash";
+    if (/répon|enregistré avec succès/.test(lower)) return "topic.post";
+    if (/nouveau sujet/.test(lower)) return "forum.post";
+    if (/message priv/.test(lower)) return "user.pm";
+    if (/banni/.test(lower)) return "user.ban";
+    if (/débanni|unban/.test(lower)) return "user.unban";
+    return "unknown";
 }
 
-// Message principal : on recompose depuis TOUS les text nodes
-function extractMessage(doc) {
-    const textNodes = collectTextNodes(doc.body || doc);
-    const combined = normalize(textNodes.join(" "));
-
-    // 1) Extraire la phrase la plus pertinente autour d'un mot‑clé
-    const needles = Array.from(
-        new Set(Object.values(ACTION_KEYWORDS).flat())
-    ).map(lower);
-    const sentence = extractSentenceAround(combined, needles);
-    if (sentence) return sentence;
-
-    // 2) Secours : premier <p> s’il existe
-    const p = (doc.querySelector("p") || {}).textContent || "";
-    if (p.trim()) return normalize(p);
-
-    // 3) Dernier recours : tout le texte
-    return combined;
+function validateOk(action, message) {
+    const lowerMsg = (message || "").toLowerCase();
+    switch (action) {
+        case "topic.move":
+            return /déplacé/.test(lowerMsg);
+        case "topic.lock":
+            return /verrouill/.test(lowerMsg);
+        case "topic.unlock":
+            return /déverrouill/.test(lowerMsg);
+        case "topic.delete":
+            return /supprim/.test(lowerMsg);
+        case "topic.trash":
+            return /corbeille|poubelle/.test(lowerMsg);
+        case "topic.post":
+            return /répon|enregistré avec succès/.test(lowerMsg);
+        case "forum.post":
+            return /nouveau sujet/.test(lowerMsg);
+        case "user.pm":
+            return /message priv/.test(lowerMsg);
+        case "user.ban":
+            return /banni/.test(lowerMsg);
+        case "user.unban":
+            return /débanni|unban/.test(lowerMsg);
+        default:
+            return false;
+    }
 }
 
 export function bridgeParse(resp) {
     const { doc, text } = resp;
-
-    // 1) Message robuste (text nodes)
     const message = extractMessage(doc);
 
-    // 2) IDs depuis tous les liens (puis priorise le premier lien)
-    const idsAll = parseAllIds(doc);
-    const firstLink = doc.querySelector("a[href]");
+    const firstLink = first(doc, "a[href]");
     const href = firstLink ? firstLink.getAttribute("href") : "";
-    const idsFirst = parseIdsFromHref(href);
-    const ids = { ...idsAll, ...idsFirst };
+    const ids = parseIdsFromHref(href);
 
-    // 3) Action & succès
-    const action = inferActionFromText(message);
-    let ok = validateOk(action, message);
-
-    // 4) Bloc d’erreur explicite → échec prioritaire
-    if (
-        doc.querySelector(
-            ".box-content.error, .error, .panel .error, .errorbox"
-        )
-    )
-        ok = false;
+    const action = inferAction(message);
+    const ok = validateOk(action, message);
 
     const links = {
         first: href || undefined,
@@ -196,13 +110,8 @@ export function bridgeParse(resp) {
 }
 
 export const __bridgeInternals = {
-    collectTextNodes,
     extractMessage,
-    extractSentenceAround,
-    inferActionFromText,
-    validateOk,
     parseIdsFromHref,
-    parseAllIds,
-    normalize,
-    lower,
+    inferAction,
+    validateOk,
 };

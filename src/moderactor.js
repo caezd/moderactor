@@ -4,6 +4,7 @@ import TopicResource from "./actions/topic.js";
 import PostResource from "./actions/post.js";
 import UserResource from "./actions/user.js";
 import ChatResource from "./actions/chat.js";
+import { env as envFn } from "./env.js";
 
 const Moderactor = {
     forum: (idOrArray) => new ForumResource(idOrArray, forumactifAdapter),
@@ -12,6 +13,7 @@ const Moderactor = {
     user: (idOrArray) => new UserResource(idOrArray, forumactifAdapter),
     chat: () => new ChatResource(forumactifAdapter),
     adapter: forumactifAdapter,
+    env: envFn,
 };
 
 if (typeof window !== "undefined") {
