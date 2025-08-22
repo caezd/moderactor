@@ -22,6 +22,7 @@ function getPageType() {
     if (/^\/t\d+(p\d+)?-/.test(p)) return "topic";
     if (/^\/f\d+(p\d+)?-/.test(p)) return "forum";
     if (/^\/c\d+-/.test(p)) return "category";
+    if (/^\/u\d+-/.test(p)) return "profile";
     const qs = p + location.search;
     const m = qs.match(/\/modcp\?mode=([^&]+)/);
     return m ? m[1] : "";
