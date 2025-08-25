@@ -14,10 +14,10 @@ export default [
             {
                 file: "dist/moderactor.js",
                 format: "iife",
-                name: "Moderaction",
+                name: "Moderactor",
                 sourcemap: true,
             },
         ],
-        plugins: [resolve(), commonjs(), terser()],
+        plugins: [resolve(), commonjs(), /*terser()*/],
     },
 ];

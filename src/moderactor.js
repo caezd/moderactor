@@ -4,6 +4,7 @@ import TopicResource from "./actions/topic.js";
 import PostResource from "./actions/post.js";
 import UserResource from "./actions/user.js";
 import ChatResource from "./actions/chat.js";
+import UIInterface from "./interfaces/ui.js";
 import { env as envFn } from "./env.js";
 
 const ENV_GLOBAL_KEY = "__MODERACTOR_ENV__";
@@ -20,7 +21,7 @@ function cacheEnv(value) {
     Moderactor._env = value;
     try {
         g[ENV_GLOBAL_KEY] = value;
-    } catch {}
+    } catch { }
     return value;
 }
 
@@ -63,6 +64,10 @@ const Moderactor = {
     chat: () => {
         if (!getCachedEnv()) refreshEnv({ stats: true });
         new ChatResource(forumactifAdapter);
+    },
+    ui: (options) => {
+        if (!getCachedEnv()) refreshEnv({ stats: true });
+        new UIInterface(forumactifAdapter, options);
     },
     adapter: forumactifAdapter,
 };
