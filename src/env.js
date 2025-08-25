@@ -3,6 +3,7 @@ import { extractDiscussion, extractBreadcrumbs } from "./core/jsonld.js";
 import { getDirectText, text } from "./core/utils.js";
 import { parseForumStats } from "./parsers/statsForum.js";
 import { parseTopicStats } from "./parsers/statsTopic.js";
+import { parseProfileStats } from "./parsers/statsProfile.js";
 
 function parseMiscVars(data) {
     const misc = {};
@@ -36,6 +37,7 @@ async function computeStats({
     fetchExtra = [],
     forum = {},
     topic = {},
+    profile = {},
 } = {}) {
     const t0 = performance.now();
     const sources = new Set();
@@ -51,7 +53,6 @@ async function computeStats({
         },
     ];
     const extras = [...defaultExtras, ...fetchExtra];
-
     if (
         effective === "topic" ||
         (effective === "auto" && state.pagetype === "forum")
@@ -67,13 +68,21 @@ async function computeStats({
                 ? parseForumStats(doc, forum)
                 : undefined;
     }
+    if (
+        effective === "profile" ||
+        (effective === "auto" && state.pagetype === "profile")
+    ) {
+        stats.profile =
+            state.pagetype === "profile"
+                ? parseProfileStats(doc, profile)
+                : undefined;
+    }
 
     for (const { url, callback } of extras) {
         try {
             const r = await fetch(url, { credentials: "same-origin" });
             sources.add(url);
 
-            // Détecte le type de réponse
             const ct = r.headers.get("content-type") || "";
             let payload;
             if (ct.includes("html")) {
@@ -87,7 +96,6 @@ async function computeStats({
 
             const res = await callback(payload);
             if (res && typeof res === "object") {
-                // Merge « doux »
                 for (const [k, v] of Object.entries(res)) {
                     if (typeof v === "object" && typeof stats[k] === "object") {
                         stats[k] = { ...stats[k], ...v };
@@ -97,7 +105,6 @@ async function computeStats({
                 }
             }
 
-            // Merge « intelligent » sur les clés attendues
             Object.assign(stats, res);
         } catch (e) {
             console.error("Error fetching extra data:", e);
@@ -110,7 +117,7 @@ async function computeStats({
     return stats;
 }
 
-export async function env(options = {}) {
+export async function env(options = { topic: {}, forum: {}, profile: {} }) {
     const doc = document;
     const statsWanted = !!options?.stats;
     const forumPageSize = options?.stats?.forum?.pageSize;
@@ -149,9 +156,12 @@ export async function env(options = {}) {
             notifications: Number(_ud["notifications"]),
             avatar: _ud["avatar"],
             avatar_link: _ud["avatar_link"],
-            posts: Number(_ud["userposts"]) || undefined,
+            posts_count: Number(_ud["userposts"]) || undefined,
             privmsgs_count: Number(_ud["user_nb_privmsgs"]) || undefined,
             group_color: _ud["groupcolor"],
+            points_count: Number(_bd["reputation_active"])
+                ? Number(_ud["point_reputation"])
+                : null,
         },
         schema: {
             discussion,
@@ -164,6 +174,8 @@ export async function env(options = {}) {
             scope: options.scope || "auto",
             fetchExtra: options.fetchExtra || [],
             forum: { pageSize: forumPageSize },
+            topic: options?.topic || {},
+            profile: options?.profile || {},
         });
         data.stats = s;
     }

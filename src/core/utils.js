@@ -12,15 +12,34 @@ export function byIdOrArray(input) {
 export function safeLower(s) {
     return String(s || "").toLowerCase();
 }
+
 export function text(el) {
     return (el?.textContent || "").trim();
 }
+
 export function toISO(d) {
     try {
         return new Date(d).toISOString();
     } catch {
         return undefined;
     }
+}
+
+export const toKey = (s, replace = "-") =>
+    String(s || "")
+        .toString()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, replace)
+        .replace(/[^\w-]+/g, "")
+        .replace(/--+/g, replace);
+
+export function nextSiblingMatching(startEl, selector) {
+    let el = startEl?.nextElementSibling || null;
+    while (el && !el.matches(selector)) el = el.nextElementSibling;
+    return el || null;
 }
 
 export const getDirectText = (el) =>

@@ -38,12 +38,9 @@ function refreshEnv(opts = {}) {
 }
 
 const Moderactor = {
-    get env() {
+    env: () => {
         const cached = getCachedEnv();
         return cached ?? refreshEnv({ stats: true });
-    },
-    set env(opts = {}) {
-        return refreshEnv(opts);
     },
     forum: (idOrArray) => {
         if (!getCachedEnv()) refreshEnv({ stats: true });
@@ -65,10 +62,10 @@ const Moderactor = {
         if (!getCachedEnv()) refreshEnv({ stats: true });
         return new ChatResource(forumactifAdapter);
     },
-    ui: (options) => {
+    /* ui: (options) => {
         if (!getCachedEnv()) refreshEnv({ stats: true });
         return new UIInterface(forumactifAdapter, options);
-    },
+    }, */
     adapter: forumactifAdapter,
 };
 

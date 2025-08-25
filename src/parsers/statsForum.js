@@ -1,5 +1,4 @@
 import { getDirectText, idsFromHref } from "../core/utils.js";
-import { extractBreadcrumbs } from "../core/jsonld.js";
 import { parsePagination } from "./pagination.js";
 
 // Compte les lignes de sujets (selon plusieurs templates)
