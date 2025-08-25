@@ -21,7 +21,7 @@ function cacheEnv(value) {
     Moderactor._env = value;
     try {
         g[ENV_GLOBAL_KEY] = value;
-    } catch { }
+    } catch {}
     return value;
 }
 
@@ -47,27 +47,27 @@ const Moderactor = {
     },
     forum: (idOrArray) => {
         if (!getCachedEnv()) refreshEnv({ stats: true });
-        new ForumResource(idOrArray, forumactifAdapter);
+        return new ForumResource(idOrArray, forumactifAdapter);
     },
     topic: (idOrArray) => {
         if (!getCachedEnv()) refreshEnv({ stats: true });
-        new TopicResource(idOrArray, forumactifAdapter);
+        return new TopicResource(idOrArray, forumactifAdapter);
     },
     post: (idOrArray) => {
         if (!getCachedEnv()) refreshEnv({ stats: true });
-        new PostResource(idOrArray, forumactifAdapter);
+        return new PostResource(idOrArray, forumactifAdapter);
     },
     user: (idOrArray) => {
         if (!getCachedEnv()) refreshEnv({ stats: true });
-        new UserResource(idOrArray, forumactifAdapter);
+        return new UserResource(idOrArray, forumactifAdapter);
     },
     chat: () => {
         if (!getCachedEnv()) refreshEnv({ stats: true });
-        new ChatResource(forumactifAdapter);
+        return new ChatResource(forumactifAdapter);
     },
     ui: (options) => {
         if (!getCachedEnv()) refreshEnv({ stats: true });
-        new UIInterface(forumactifAdapter, options);
+        return new UIInterface(forumactifAdapter, options);
     },
     adapter: forumactifAdapter,
 };
