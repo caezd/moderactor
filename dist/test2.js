@@ -117,7 +117,7 @@
         const idAttr = postEl.getAttribute("id") || "";
         const byId = idAttr.match(/^p(\d+)$/);
         if (byId) return byId[1];
-        const a = postEl.querySelector('a[href*="#p"]');
+        const a = postEl.querySelector('[class*="post--"]');
         if (a) {
             const m = a.getAttribute("href").match(/#p(\d+)/);
             if (m) return m[1];
@@ -226,19 +226,6 @@
                 saveCache(lsCache);
                 return created;
             }
-            // 4) re-try find
-            const again = await API.findTopicByTitle({
-                forumId: CFG.comments_forum_id,
-                title,
-            });
-            if (again) {
-                lsCache[rp.id] = again;
-                saveCache(lsCache);
-                return again;
-            }
-            throw new Error(
-                "Sujet de commentaires non retrouvé après création."
-            );
         })();
 
         memCache.set(rp.id, work);
