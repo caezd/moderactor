@@ -16,9 +16,6 @@ export function parseTopicStats(
     doc,
     { pageSizeOverride, defaultPageSize = 25 } = {}
 ) {
-    const discussion = extractDiscussion(doc)[0] || null;
-    const breadcrumb = extractBreadcrumbs(doc)[0] || null;
-
     const title =
         discussion?.headline ||
         doc.querySelector("h1.page-title")?.textContent?.trim() ||
@@ -31,9 +28,6 @@ export function parseTopicStats(
 
     const repliesListCount = countReplies(doc);
 
-    // 2) JSON‑LD (dates + total comments/pages)
-
-    // 4) Pagination visible
     const pagination = parsePagination(doc, {
         pageSizeOverride,
         defaultPageSize,

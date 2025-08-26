@@ -22,13 +22,38 @@ function extractMessage(doc) {
 function parseIdsFromHref(href) {
     const ids = {};
     if (!href) return ids;
-    const t = href.match(/\/(?:t|viewtopic\?.*?t=)(\d+)/);
+
+    // topic id (depuis /tID-... OU viewtopic?...t=ID)
+    const t =
+        href.match(/\/t(\d+)-/) || href.match(/viewtopic\?.*?[?&]t=(\d+)/);
     if (t) ids.topic_id = Number(t[1]);
+
+    // slug
+    const s = href.match(/\/t\d+-([^\/?#]+)/);
+    if (s) ids.topic_slug = s[1];
+
+    // forum id
     const f = href.match(/\/f(\d+)-/);
     if (f) ids.forum_id = Number(f[1]);
+
+    // post id (anchor)
     const p = href.match(/#(\d+)$/);
     if (p) ids.post_id = Number(p[1]);
+
+    // start (pagination)
+    const st = href.match(/[?&]start=(\d+)/);
+    if (st) ids.start = Number(st[1]);
+
+    // flags utiles
+    ids.is_topic = /^\/t\d+-/.test(href);
+    ids.is_viewtopic = /\/viewtopic\?/.test(href);
+
     return ids;
+}
+
+function canonicalTopicUrl(doc) {
+    const a = doc.querySelector('a[href^="/t"]');
+    return a ? a.getAttribute("href") : undefined;
 }
 
 function inferAction(message) {
@@ -86,16 +111,53 @@ export function bridgeParse(resp) {
     const action = inferAction(message);
     const ok = validateOk(action, message);
 
+    const topicLink = all(doc, 'a[href^="/t"], a[href*="viewtopic"]').map((a) =>
+        a.getAttribute("href")
+    )[0];
+    const forumLink = all(doc, 'a[href^="/f"]').map((a) =>
+        a.getAttribute("href")
+    )[0];
+
+    // Tente d’obtenir une URL canonique de sujet (si on n’a qu’un viewtopic)
+    let topicUrl = topicLink;
+    if (topicUrl && /viewtopic\?/.test(topicUrl)) {
+        const can = canonicalTopicUrl(doc);
+        if (can) topicUrl = can;
+    }
+
     const links = {
         first: href || undefined,
-        topic:
-            all(doc, 'a[href^="/t"], a[href*="viewtopic"]').map((a) =>
-                a.getAttribute("href")
-            )[0] || undefined,
-        forum:
-            all(doc, 'a[href^="/f"]').map((a) => a.getAttribute("href"))[0] ||
-            undefined,
+        topic: topicUrl || undefined,
+        forum: forumLink || undefined,
     };
+
+    // Entité normalisée pour usage direct par Moderactor
+    const entity = {};
+    if (ok) {
+        if (
+            action === "forum.post" ||
+            (action === "topic.post" && ids.is_topic)
+        ) {
+            // Création d’un nouveau sujet
+            entity.topic = {
+                id: ids.topic_id,
+                url: links.topic,
+                slug: ids.topic_slug,
+                forumId: ids.forum_id,
+            };
+        } else if (action === "topic.post") {
+            // Réponse dans un sujet existant
+            // si pas de lien canonique, on garde viewtopic#post
+            const postHref = links.topic || href;
+            entity.post = {
+                id: ids.post_id,
+                topicId: ids.topic_id,
+                url: postHref,
+            };
+        } else if (action === "user.pm") {
+            entity.pm = { inboxUrl: "/privmsg?folder=inbox" };
+        }
+    }
 
     return {
         ok,
@@ -105,6 +167,7 @@ export function bridgeParse(resp) {
         ids,
         links,
         href,
+        entity,
         raw: text,
     };
 }

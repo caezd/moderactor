@@ -20,13 +20,18 @@ class Adapter {
 }
 
 function encodeForm(data) {
-    var form_data = new FormData();
-
-    for (var key in data) {
-        form_data.append(key, data[key]);
+    const form_data = new FormData();
+    for (const key in data) {
+        const val = data[key];
+        if (Array.isArray(val)) {
+            const k = key.endsWith("[]") ? key : key + "[]";
+            for (const v of val) form_data.append(k, v);
+        } else {
+            form_data.append(key, val);
+        }
     }
     return [...form_data.entries()]
-        .map((x) => `${encodeURIComponent(x[0])}=${encodeURIComponent(x[1])}`)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
         .join("&");
 }
 
@@ -43,6 +48,7 @@ async function httpGet(url) {
 
 async function httpPost(url, data) {
     const body = encodeForm(data);
+    console.log("[httpPost] body:", body);
     const r = await fetch(url, {
         method: "POST",
         credentials: "same-origin",
@@ -145,13 +151,38 @@ function extractMessage(doc) {
 function parseIdsFromHref(href) {
     const ids = {};
     if (!href) return ids;
-    const t = href.match(/\/(?:t|viewtopic\?.*?t=)(\d+)/);
+
+    // topic id (depuis /tID-... OU viewtopic?...t=ID)
+    const t =
+        href.match(/\/t(\d+)-/) || href.match(/viewtopic\?.*?[?&]t=(\d+)/);
     if (t) ids.topic_id = Number(t[1]);
+
+    // slug
+    const s = href.match(/\/t\d+-([^\/?#]+)/);
+    if (s) ids.topic_slug = s[1];
+
+    // forum id
     const f = href.match(/\/f(\d+)-/);
     if (f) ids.forum_id = Number(f[1]);
+
+    // post id (anchor)
     const p = href.match(/#(\d+)$/);
     if (p) ids.post_id = Number(p[1]);
+
+    // start (pagination)
+    const st = href.match(/[?&]start=(\d+)/);
+    if (st) ids.start = Number(st[1]);
+
+    // flags utiles
+    ids.is_topic = /^\/t\d+-/.test(href);
+    ids.is_viewtopic = /\/viewtopic\?/.test(href);
+
     return ids;
+}
+
+function canonicalTopicUrl(doc) {
+    const a = doc.querySelector('a[href^="/t"]');
+    return a ? a.getAttribute("href") : undefined;
 }
 
 function inferAction(message) {
@@ -209,16 +240,53 @@ function bridgeParse(resp) {
     const action = inferAction(message);
     const ok = validateOk(action, message);
 
+    const topicLink = all(doc, 'a[href^="/t"], a[href*="viewtopic"]').map((a) =>
+        a.getAttribute("href")
+    )[0];
+    const forumLink = all(doc, 'a[href^="/f"]').map((a) =>
+        a.getAttribute("href")
+    )[0];
+
+    // Tente d’obtenir une URL canonique de sujet (si on n’a qu’un viewtopic)
+    let topicUrl = topicLink;
+    if (topicUrl && /viewtopic\?/.test(topicUrl)) {
+        const can = canonicalTopicUrl(doc);
+        if (can) topicUrl = can;
+    }
+
     const links = {
         first: href || undefined,
-        topic:
-            all(doc, 'a[href^="/t"], a[href*="viewtopic"]').map((a) =>
-                a.getAttribute("href")
-            )[0] || undefined,
-        forum:
-            all(doc, 'a[href^="/f"]').map((a) => a.getAttribute("href"))[0] ||
-            undefined,
+        topic: topicUrl || undefined,
+        forum: forumLink || undefined,
     };
+
+    // Entité normalisée pour usage direct par Moderactor
+    const entity = {};
+    if (ok) {
+        if (
+            action === "forum.post" ||
+            (action === "topic.post" && ids.is_topic)
+        ) {
+            // Création d’un nouveau sujet
+            entity.topic = {
+                id: ids.topic_id,
+                url: links.topic,
+                slug: ids.topic_slug,
+                forumId: ids.forum_id,
+            };
+        } else if (action === "topic.post") {
+            // Réponse dans un sujet existant
+            // si pas de lien canonique, on garde viewtopic#post
+            const postHref = links.topic || href;
+            entity.post = {
+                id: ids.post_id,
+                topicId: ids.topic_id,
+                url: postHref,
+            };
+        } else if (action === "user.pm") {
+            entity.pm = { inboxUrl: "/privmsg?folder=inbox" };
+        }
+    }
 
     return {
         ok,
@@ -228,6 +296,7 @@ function bridgeParse(resp) {
         ids,
         links,
         href,
+        entity,
         raw: text,
     };
 }
@@ -239,7 +308,6 @@ class ForumactifAdapter extends Adapter {
     async post(url, data) {
         return httpPost(url, data);
     }
-
     async getForm(url, formSelector) {
         const resp = await this.get(url);
         if (!resp.ok)
@@ -274,6 +342,14 @@ function byIdOrArray(input) {
         .map((x) => (typeof x === "number" ? x : parseInt(String(x), 10)))
         .filter((x) => Number.isFinite(x) && x > 0);
 }
+
+const isNumericId = (v) =>
+    typeof v === "number" || /^\d+$/.test(String(v));
+
+const uniqueNFC = (arr) =>
+    Array.from(new Set(arr.map((s) => toNFC(String(s)))));
+
+const toNFC = (s) => (typeof s === "string" ? s.normalize("NFC") : s);
 
 const toKey = (s, replace = "-") =>
     String(s || "")
@@ -430,6 +506,59 @@ class TopicResource extends BaseResource {
     }
 }
 
+/**
+ * Récupère l'id du topic (input name="t") à partir d'un post via la page quote,
+ * si explicitTopicId est absent.
+ * @param {object} adapter - doit exposer getForm(url, selector)
+ * @param {number|string|undefined|null} explicitTopicId
+ * @param {number|string} postId
+ * @returns {Promise<number>}
+ */
+async function resolveTopicId(adapter, explicitTopicId, postId) {
+    if (explicitTopicId != null) return Number(explicitTopicId);
+
+    const form = await adapter.getForm(
+        `/post?p=${postId}&mode=quote`,
+        'form[method="post"]'
+    );
+    if (!form?.ok) {
+        throw new Error(
+            "resolveTopicId: impossible de récupérer le topic via quote()"
+        );
+    }
+    const t = parseInt(form.data?.t, 10);
+    if (!t) throw new Error("resolveTopicId: topicId introuvable (form quote)");
+    return t;
+}
+
+/**
+ * Récupère l'id du forum du topic (input name="f") via la page move,
+ * si explicitForumId est absent.
+ * @param {object} adapter - doit exposer getForm(url, selector)
+ * @param {number|string} topicId
+ * @param {number|string|undefined|null} explicitForumId
+ * @param {number|string} tid - token modcp
+ * @returns {Promise<number>}
+ */
+async function resolveForumId(adapter, topicId, explicitForumId, tid) {
+    if (explicitForumId != null) return Number(explicitForumId);
+
+    const form = await adapter.getForm(
+        `/modcp?mode=move&t=${topicId}&tid=${tid}`,
+        'form[method="post"]'
+    );
+    if (!form?.ok) {
+        throw new Error(
+            "resolveForumId: impossible de récupérer le forum du topic"
+        );
+    }
+    const f = parseInt(form.data?.f, 10);
+    if (!f) throw new Error("resolveForumId: forumId introuvable (form move)");
+    return f;
+}
+
+// actions/post.js
+
 class PostResource extends BaseResource {
     async delete() {
         const tasks = this.ids.map((p) =>
@@ -442,77 +571,63 @@ class PostResource extends BaseResource {
 
     async update({ message }) {
         if (!message) throw new Error("Post.update: message requis");
+
         const tasks = this.ids.map(async (p) => {
             const form = await this.adapter.getForm(
                 `/post?p=${p}&mode=editpost`,
                 'form[name="post"]'
             );
             if (!form.ok) return form;
-            const data = { ...form.data, message };
+
+            const data = { ...form.data, message }; // <-- FIX
             data.post = 1;
+
             const resp = await this.adapter.post("/post", data);
             return this.adapter.bridge(resp);
         });
+
         return this._all(tasks);
     }
-}
 
-class UserResource extends BaseResource {
-    async pm({ subject, message }) {
-        if (!subject || !message)
-            throw new Error("User.pm: subject et message requis");
-        const username = this.ids.join(", ");
-        const resp = await this.adapter.post("/privmsg", {
-            username,
-            mode: "post",
-            post: 1,
+    /**
+     * Scinde un ou plusieurs messages vers un nouveau sujet
+     * @param {string} newTitle - Titre du nouveau sujet
+     * @param {number} [newForumId] - Forum cible (sinon forum courant)
+     * @param {number} [topicId] - Topic source (sinon déduit du post)
+     * @param {boolean} [beyond=false] - true = split beyond, false = split all
+     */
+    async split(
+        newTitle,
+        { newForumId = null, topicId = null, beyond = false } = {}
+    ) {
+        if (!this.ids.length) return [];
+        const tid = this.adapter.tid; // token temporaire
+        if (!tid) throw new Error("Post.split: tid introuvable");
+
+        const subject = String(title || "").trim();
+        if (!subject) throw new Error("Post.split: subject requis");
+
+        const firstPost = this.ids[0];
+
+        // Helpers fournis par moderactor.js
+        const t = await resolveTopicId(this.adapter, topicId, firstPost); // topic source
+        const f = await resolveForumId(this.adapter, t, newForumId, tid); // forum cible
+
+        const data = {
             subject,
-            message,
-        });
+            new_forum_id: "f" + Number(f),
+            "post_id_list[]": this.ids.map(Number),
+            t: Number(t),
+            mode: "split",
+            ["split_type_" + (beyond ? "beyond" : "all")]: 1,
+        };
+
+        const resp = await this.adapter.post(`/modcp?tid=${tid}`, data); // tid en URL
         return this.adapter.bridge(resp);
     }
 
-    async ban({ days = 0, reason = "" } = {}) {
-        const tid = this.adapter.tid;
-        if (!tid) throw new Error("User.ban: tid introuvable");
-        const tasks = this.ids.map((user_id) =>
-            this.adapter
-                .post(`/modcp?tid=${tid}`, {
-                    tid,
-                    confirm: 1,
-                    mode: "ban",
-                    user_id,
-                    ban_user_date: days,
-                    ban_user_reason: reason,
-                })
-                .then((r) => this.adapter.bridge(r))
-        );
-        return this._all(tasks);
-    }
-
-    async unban() {
-        const tid = this.adapter.tid;
-        if (!tid) throw new Error("User.unban: tid introuvable");
-        const resp = await this.adapter.post(
-            `/admin/index.forum?part=users_groups&sub=users&mode=ban_control&extended_admin=1&tid=${tid}`,
-            { users_to_unban: this.ids, unban_users: 1 }
-        );
-        return this.adapter.bridge(resp);
-    }
-}
-
-class ChatResource extends BaseResource {
-    constructor(adapter) {
-        super([], adapter);
-    }
-    async post({ message }) {
-        if (!message) throw new Error("Chat.post: message requis");
-        await this.adapter.post("/chatbox/actions.forum", {
-            method: "send",
-            archive: 0,
-            message,
-        });
-        return { ok: true };
+    async splitBeyond(title, newForumId, topicId) {
+        return this.split(title, newForumId, topicId, true);
     }
 }
 
@@ -644,18 +759,186 @@ function extractJsonLd(doc = document, onlyTypes) {
 }
 
 /** Raccourcis pratiques pour les 2 types courants */
-function extractBreadcrumbs$1(doc = document) {
+function extractBreadcrumbs(doc = document) {
     return (
         extractJsonLd(doc, ["BreadcrumbList"]).byType["BreadcrumbList"] || []
     );
 }
 
-function extractDiscussion$1(doc = document) {
+function extractDiscussion(doc = document) {
     return (
         extractJsonLd(doc, ["DiscussionForumPosting"]).byType[
             "DiscussionForumPosting"
         ] || []
     );
+}
+
+async function fetchUsernameById(adapter, id) {
+    const r = await adapter.get(`/u${id}`);
+    if (!r?.ok) throw new Error(`fetchUsernameById: HTTP ${r?.status}`);
+
+    // 1) JSON-LD → BreadcrumbList
+    const crumbs = extractBreadcrumbs(r.doc);
+    if (crumbs.length) {
+        const last = crumbs[0].items
+            .slice()
+            .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+            .pop();
+        const name = last?.name?.trim();
+        if (name) return name;
+    }
+
+    // Fallback DOM
+    const candidates = ["meta[name='title']"];
+    for (const sel of candidates) {
+        const el = r.doc.querySelector(sel);
+        const raw =
+            el?.getAttribute?.("content")?.replace(/^Profil\s*-\s*/i, "") ||
+            el?.textContent ||
+            "";
+        const name = raw.trim();
+        if (name) return name;
+    }
+
+    throw new Error(`fetchUsernameById: username introuvable pour u${id}`);
+}
+
+async function resolveRecipients(adapter, input) {
+    const raw = Array.isArray(input) ? input : [input];
+
+    const jobs = raw.map((item) => {
+        if (isNumericId(item)) {
+            return fetchUsernameById(adapter, Number(item))
+                .then((name) => toNFC(name))
+                .catch(() => null);
+        }
+        if (typeof item === "string") {
+            const s = toNFC(item.trim());
+            return Promise.resolve(s || null);
+        }
+        return Promise.resolve(null);
+    });
+
+    const settled = await Promise.allSettled(jobs);
+    const names = settled
+        .filter((r) => r.status === "fulfilled" && r.value)
+        .map((r) => r.value);
+
+    return uniqueNFC(names);
+}
+
+class UserResource extends BaseResource {
+    constructor(idsOrNames, adapter) {
+        const list = Array.isArray(idsOrNames) ? idsOrNames : [idsOrNames];
+        super(list, adapter);
+
+        this._raw = list;
+        this._idsOnly = list
+            .filter((v) => isNumericId(v))
+            .map((v) => Number(v));
+    }
+
+    /**
+     * Envoie un message privé.
+     * @param {object} param0
+     * @param {string} param0.subject
+     * @param {string} param0.message
+     * @param {Array<number|string>} [param0.usernames] – override optionnel (ids/noms)
+     */
+    async pm({ subject, message, usernames } = {}) {
+        if (!subject || !message) {
+            throw new Error("User.pm: subject et message requis");
+        }
+
+        const recipients = await resolveRecipients(
+            this.adapter,
+            usernames ?? this._raw
+        );
+
+        if (!recipients.length) {
+            throw new Error("User.pm: aucun destinataire");
+        }
+
+        /* const form = await this.adapter.getForm(
+            "/privmsg?mode=post",
+            'form[name="post"]'
+        );
+        if (!form?.ok) {
+            throw new Error(
+                "User.pm: formulaire introuvable (/privmsg?mode=post)"
+            );
+        } */
+
+        const data = {
+            "username[]": recipients,
+            subject,
+            message,
+            post: 1,
+        };
+
+        const resp = await this.adapter.post("/privmsg", data);
+        return this.adapter.bridge(resp);
+    }
+
+    /**
+     * Bannit les IDs présents dans le constructeur (ou fournis).
+     * @param {object} param0
+     * @param {number} [param0.days=0]
+     * @param {string} [param0.reason=""]
+     * @param {Array<number>} [param0.ids] – override optionnel (IDs uniquement)
+     */
+    async ban({ days = 0, reason = "", ids } = {}) {
+        const tid = this.adapter.tid;
+        if (!tid) throw new Error("User.ban: tid introuvable");
+
+        const targetIds = Array.isArray(ids) ? ids : this._idsOnly;
+        if (!targetIds.length) throw new Error("User.ban: aucun ID numérique");
+
+        const tasks = targetIds.map((user_id) =>
+            this.adapter
+                .post(`/modcp?tid=${tid}`, {
+                    tid,
+                    confirm: 1,
+                    mode: "ban",
+                    user_id,
+                    ban_user_date: days,
+                    ban_user_reason: reason,
+                })
+                .then((r) => this.adapter.bridge(r))
+        );
+
+        return this._all(tasks);
+    }
+
+    async unban({ ids } = {}) {
+        const tid = this.adapter.tid;
+        if (!tid) throw new Error("User.unban: tid introuvable");
+
+        const targetIds = Array.isArray(ids) ? ids : this._idsOnly;
+        if (!targetIds.length)
+            throw new Error("User.unban: aucun ID numérique");
+
+        const resp = await this.adapter.post(
+            `/admin/index.forum?part=users_groups&sub=users&mode=ban_control&extended_admin=1&tid=${tid}`,
+            { users_to_unban: targetIds, unban_users: 1 }
+        );
+        return this.adapter.bridge(resp);
+    }
+}
+
+class ChatResource extends BaseResource {
+    constructor(adapter) {
+        super([], adapter);
+    }
+    async post({ message }) {
+        if (!message) throw new Error("Chat.post: message requis");
+        await this.adapter.post("/chatbox/actions.forum", {
+            method: "send",
+            archive: 0,
+            message,
+        });
+        return { ok: true };
+    }
 }
 
 function parsePagination(
@@ -830,9 +1113,6 @@ function parseTopicStats(
     doc,
     { pageSizeOverride, defaultPageSize = 25 } = {}
 ) {
-    const discussion = extractDiscussion(doc)[0] || null;
-    extractBreadcrumbs(doc)[0] || null;
-
     const title =
         discussion?.headline ||
         doc.querySelector("h1.page-title")?.textContent?.trim() ||
@@ -845,9 +1125,6 @@ function parseTopicStats(
 
     const repliesListCount = countReplies(doc);
 
-    // 2) JSON‑LD (dates + total comments/pages)
-
-    // 4) Pagination visible
     const pagination = parsePagination(doc, {
         pageSizeOverride,
         defaultPageSize,
@@ -881,10 +1158,35 @@ function parseTopicStats(
  * dd pour content (ou nextElementSibling si null/empty)
  */
 const defaultCandidates = [
+    /** PHPBB2 ADVANCED */
+    {
+        probe: { type: "selector", sel: "#profile-advanced-details dl" },
+        dt: "dt span",
+        dd: ".field_uneditable",
+    },
+    /** PHPBB3 & MODERNBB & AWESOMEBB ADVANCED */
     {
         probe: { type: "selector", sel: "#profile-tab-field-profil dl" },
         dt: "dt span",
+        dd: ".field_uneditable",
+    },
+    { probe: { type: "selector", sel: ".mod-login-avatar" }, field: "avatar" },
+
+    /** PunBB & INVISION ADVANCED */
+    {
+        probe: { type: "selector", sel: "#profile-advanced-details dl" },
+        dt: "dt span",
         dd: ".field_uneditable", // => dt.nextElementSibling
+    },
+
+    {
+        probe: { type: "selector", sel: "h1" },
+        field: "username",
+        extract: {
+            mode: "text",
+            remove: [/^Tout à propos de\s*/i],
+            normalizeWhitespace: true,
+        },
     },
 ];
 
@@ -892,26 +1194,126 @@ function whenEmpty(s) {
     return s === "-" ? "" : s;
 }
 
-function pickCandidate(doc, candidates = []) {
+function pickCandidates(doc, candidates = []) {
+    const matches = [];
     for (const c of candidates) {
-        if (c.probe?.type === "selector") {
-            const roots = doc.querySelectorAll(c.root || c.probe.sel);
-            if (roots.length) return { cfg: c, roots: Array.from(roots) };
+        if (c.probe?.type === "selector" && typeof c.probe.sel === "string") {
+            const roots = doc.querySelectorAll(c.probe.sel);
+            if (roots.length) {
+                matches.push({ cfg: c, roots: Array.from(roots) });
+            }
         }
     }
-    return null;
+    return matches;
+}
+
+function extractValue(rootEl, c) {
+    const ex = c.extract;
+
+    // 1) extract peut être une fonction personnalisée
+    if (typeof ex === "function") {
+        return ex(rootEl) ?? "";
+    }
+
+    // 2) extract peut être une chaîne courte : "text" | "innerHTML" | "outerHTML" | "attr:NAME"
+    if (typeof ex === "string") {
+        if (ex === "text") return rootEl.textContent?.trim() ?? "";
+        if (ex === "innerHTML") return rootEl.innerHTML?.trim() ?? "";
+        if (ex === "outerHTML") return rootEl.outerHTML?.trim() ?? "";
+        if (ex.startsWith("attr:")) {
+            const attr = ex.slice("attr:".length);
+            return (rootEl.getAttribute?.(attr) || "").trim();
+        }
+        // défaut: innerHTML
+        return rootEl.innerHTML?.trim() ?? "";
+    }
+
+    // 3) extract peut être un objet riche
+    if (ex && typeof ex === "object") {
+        // Options supportées :
+        // mode: "text" | "innerHTML" | "outerHTML" | "attr"
+        // sel: sous-sélecteur optionnel
+        // attr: nom d'attribut si mode === "attr"
+        // match: RegExp OU string (on garde le 1er groupe si RegExp avec groupe, sinon le match complet)
+        // remove: RegExp | string | Array<RegExp|string> à retirer
+        // replace: Array<[RegExp|string, string]> (chaîne de remplacements)
+        // normalizeWhitespace: boolean
+        // trim: boolean (défaut: true)
+
+        const {
+            mode = "innerHTML",
+            sel = null,
+            attr = null,
+            match = null,
+            remove = null,
+            replace = null,
+            normalizeWhitespace = false,
+            trim = true,
+        } = ex;
+
+        // cibler un sous-élément si demandé
+        const el = sel ? rootEl.querySelector(sel) || rootEl : rootEl;
+
+        let val = "";
+        if (mode === "text") val = el.textContent ?? "";
+        else if (mode === "outerHTML") val = el.outerHTML ?? "";
+        else if (mode === "attr" && attr) val = el.getAttribute?.(attr) ?? "";
+        else val = el.innerHTML ?? ""; // innerHTML par défaut
+
+        // match : garder seulement une portion
+        if (match) {
+            if (match instanceof RegExp) {
+                const m = val.match(match);
+                if (m) val = m[1] ?? m[0];
+                else val = "";
+            } else if (typeof match === "string") {
+                const idx = val.indexOf(match);
+                val = idx >= 0 ? match : "";
+            }
+        }
+
+        // remove : retirer motifs
+        const applyRemove = (v, pat) =>
+            pat instanceof RegExp ? v.replace(pat, "") : v.split(pat).join("");
+        if (remove) {
+            if (Array.isArray(remove)) {
+                for (const pat of remove) val = applyRemove(val, pat);
+            } else {
+                val = applyRemove(val, remove);
+            }
+        }
+
+        // replace : liste de [pattern, repl]
+        if (Array.isArray(replace)) {
+            for (const [pat, repl] of replace) {
+                if (pat instanceof RegExp) val = val.replace(pat, repl);
+                else val = val.split(pat).join(repl);
+            }
+        }
+
+        if (normalizeWhitespace) {
+            val = val.replace(/\s+/g, " ");
+        }
+        if (trim) {
+            val = val.trim();
+        }
+        return val;
+    }
+
+    // 4) défaut si extract non fourni : innerHTML
+    return rootEl.innerHTML?.trim() ?? "";
 }
 
 function* iterEntriesForRoot(rootEl, c) {
-    // MODE A: map de champs (plusieurs)
+    // MODE A: champ unique via 'field' (ex: avatar) -> on remonte innerHTML
     if (typeof c.field === "string") {
         const key = toKey(c.field);
-        const value = rootEl.innerHTML.trim(); // ou rootEl.textContent.trim()
-        yield { key, valueEl: { textContent: value } }; // petit hack : on passe un faux "el"
+        const value = extractValue(rootEl, c);
+        yield { key, valueEl: { textContent: value } };
         return;
     }
 
-    // MODE B: dt/dd classique
+    // MODE B: dt/dd classique (plusieurs paires)
     const dtSel = c.dt || "dt";
     const ddSel = c.dd ?? null;
     const dts = rootEl.querySelectorAll(dtSel);
@@ -930,21 +1332,26 @@ function* iterEntriesForRoot(rootEl, c) {
 }
 
 function readUserFields(doc, candidates) {
-    const choice = pickCandidate(doc, candidates);
-    if (!choice) return {};
+    // On veut tous les matchs, pas juste le premier
+    const choices = pickCandidates(doc, candidates);
+    if (!choices.length) return {};
 
-    const { cfg, roots } = choice;
     const out = {};
 
-    for (const rootEl of roots) {
-        for (const { key, valueEl } of iterEntriesForRoot(rootEl, cfg)) {
-            const value =
-                valueEl && "textContent" in valueEl
-                    ? whenEmpty(valueEl.textContent.trim())
-                    : "";
-            if (!(key in out)) out[key] = value;
-            else if (value && !out[key].includes(value))
-                out[key] = `${out[key]}, ${value}`;
+    for (const { cfg, roots } of choices) {
+        for (const rootEl of roots) {
+            for (const { key, valueEl } of iterEntriesForRoot(rootEl, cfg)) {
+                const value =
+                    valueEl && "textContent" in valueEl
+                        ? whenEmpty(valueEl.textContent.trim())
+                        : "";
+
+                if (!(key in out)) {
+                    out[key] = value;
+                } else if (value && !out[key].includes(value)) {
+                    out[key] = `${out[key]}, ${value}`;
+                }
+            }
         }
     }
     return out;
@@ -1074,8 +1481,8 @@ async function env(options = { topic: {}, forum: {}, profile: {} }) {
     const statsWanted = !!options?.stats;
     options?.stats?.forum?.pageSize;
 
-    const discussion = extractDiscussion$1(doc)[0] || null;
-    const breadcrumbs = extractBreadcrumbs$1(doc)[0] || null;
+    const discussion = extractDiscussion(doc)[0] || null;
+    const breadcrumbs = extractBreadcrumbs(doc)[0] || null;
 
     const u = location;
     const hash = u.hash ? u.hash.substring(1) : null;

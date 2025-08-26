@@ -10,7 +10,6 @@ class ForumactifAdapter extends Adapter {
     async post(url, data) {
         return httpPost(url, data);
     }
-
     async getForm(url, formSelector) {
         const resp = await this.get(url);
         if (!resp.ok)

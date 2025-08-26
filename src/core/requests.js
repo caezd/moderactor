@@ -1,11 +1,16 @@
 function encodeForm(data) {
-    var form_data = new FormData();
-
-    for (var key in data) {
-        form_data.append(key, data[key]);
+    const form_data = new FormData();
+    for (const key in data) {
+        const val = data[key];
+        if (Array.isArray(val)) {
+            const k = key.endsWith("[]") ? key : key + "[]";
+            for (const v of val) form_data.append(k, v);
+        } else {
+            form_data.append(key, val);
+        }
     }
     return [...form_data.entries()]
-        .map((x) => `${encodeURIComponent(x[0])}=${encodeURIComponent(x[1])}`)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
         .join("&");
 }
 
@@ -22,6 +27,7 @@ export async function httpGet(url) {
 
 export async function httpPost(url, data) {
     const body = encodeForm(data);
+    console.log("[httpPost] body:", body);
     const r = await fetch(url, {
         method: "POST",
         credentials: "same-origin",

@@ -13,6 +13,14 @@ export function safeLower(s) {
     return String(s || "").toLowerCase();
 }
 
+export const isNumericId = (v) =>
+    typeof v === "number" || /^\d+$/.test(String(v));
+
+export const uniqueNFC = (arr) =>
+    Array.from(new Set(arr.map((s) => toNFC(String(s)))));
+
+export const toNFC = (s) => (typeof s === "string" ? s.normalize("NFC") : s);
+
 export function text(el) {
     return (el?.textContent || "").trim();
 }
