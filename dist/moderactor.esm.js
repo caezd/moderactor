@@ -181,8 +181,10 @@ function parseIdsFromHref(href) {
 }
 
 function canonicalTopicUrl(doc) {
-    const a = doc.querySelector('a[href^="/t"]');
-    return a ? a.getAttribute("href") : undefined;
+    const a = all(doc, 'a[href^="/t"]').filter((href) =>
+        /^\/t\d+(p\d+)?-/.test(href)
+    );
+    return a.length > 0 ? a[0].getAttribute("href") : undefined;
 }
 
 function inferAction(message) {
@@ -243,9 +245,10 @@ function bridgeParse(resp) {
     const topicLink = all(doc, 'a[href^="/t"], a[href*="viewtopic"]').map((a) =>
         a.getAttribute("href")
     )[0];
-    const forumLink = all(doc, 'a[href^="/f"]').map((a) =>
-        a.getAttribute("href")
-    )[0];
+    const forumLinks = all(doc, "a[href]")
+        .map((a) => a.getAttribute("href"))
+        .filter((href) => /^\/f\d+(p\d+)?-/.test(href));
+    const forumLink = forumLinks.length > 0 ? forumLinks[0] : undefined;
 
     // Tente d’obtenir une URL canonique de sujet (si on n’a qu’un viewtopic)
     let topicUrl = topicLink;
@@ -1114,9 +1117,7 @@ function parseTopicStats(
     { pageSizeOverride, defaultPageSize = 25 } = {}
 ) {
     const title =
-        discussion?.headline ||
-        doc.querySelector("h1.page-title")?.textContent?.trim() ||
-        null;
+        doc.querySelector("h1.page-title")?.textContent?.trim() || null;
     const canonical = doc.querySelector('link[rel="canonical"]')?.href || null;
 
     const meta = parseFromUrl(canonical);

@@ -17,9 +17,7 @@ export function parseTopicStats(
     { pageSizeOverride, defaultPageSize = 25 } = {}
 ) {
     const title =
-        discussion?.headline ||
-        doc.querySelector("h1.page-title")?.textContent?.trim() ||
-        null;
+        doc.querySelector("h1.page-title")?.textContent?.trim() || null;
     const canonical = doc.querySelector('link[rel="canonical"]')?.href || null;
 
     const meta = parseFromUrl(canonical);

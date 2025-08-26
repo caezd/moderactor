@@ -3,9 +3,60 @@
 // @description  Ajouter un bouton "Commenter" aux messages RP et poster dans un sujet dédié.
 // @version      0.1.0
 // ==/UserPlugin==
+/*
+ * =============================================================
+ *  FICHIER : test.js (plugin utilisateur Moderactor)
+ *  OBJET   : Ajout de commentaires "out of band" pour un RP (RolePlay)
+ *
+ *  FONCTIONNEMENT (vue d'ensemble) :
+ *  1. Injection d'un bouton « Commenter » sous chaque message d'un sujet RP.
+ *  2. Au clic : ouverture d'une mini‑fenêtre (overlay) ou redirection vers l'éditeur.
+ *  3. Le message saisi est publié soit :
+ *       - dans un sujet unique (mode "single_topic"),
+ *       - dans un sujet dédié par RP (créé ou retrouvé automatiquement) (mode "per_topic").
+ *  4. Chaque commentaire inclut un lien vers le message RP d'origine.
+ *
+ *  POINTS CLÉS D'IMPLÉMENTATION :
+ *  - Configuration centralisée dans l'objet CFG.
+ *  - Couche API (objet API) s'appuyant sur Moderactor pour créer / répondre aux sujets.
+ *  - Fonctions utilitaires DOM pour récupérer l'ID de message et fabriquer un permalink.
+ *  - Overlay minimaliste auto‑contenu évitant de quitter la page.
+ *
+ *  LIMITES / REMARQUES TECHNIQUES :
+ *  - La fonction `topicFromHref` est utilisée (normalizeCreatedTopicFromBridge, findCommentThreadViaTag) mais n'est PAS définie dans ce fichier. Prévoir soit son import, soit son implémentation (ex: parsing /t(\d+)-). Sans elle, certaines résolutions d'URL peuvent échouer silencieusement.
+ *  - Dans `ensureCommentThread`, l'appel est `API.findCommentThreadViaTag(...)` alors que la fonction globale définie est `findCommentThreadViaTag` (hors objet API). Cela provoquera une erreur d'exécution (TypeError: API.findCommentThreadViaTag is not a function). Deux options :
+ *        a) Renommer l'appel en `await findCommentThreadViaTag({ topicId: ..., ... })` (mais signatures différentes ici),
+ *        b) Intégrer la fonction au sein de l'objet API et aligner la signature.
+ *    → Pour l'instant, on laisse tel quel et on marque un TODO.
+ *  - Aucune gestion d'i18n (libellés en français en dur).
+ *  - Pas de throttling / batch sur le futur compteur de commentaires.
+ *  - `sessionStorage` utilisé pour pré-remplir l'éditeur externe (à implémenter côté page d'édition si besoin).
+ *
+ *  SÉCURITÉ / ROBUSTESSE :
+ *  - Pas de sanitation côté client (on s'appuie sur l'éditeur / backend).
+ *  - Suppose que l'utilisateur est authentifié et autorisé à poster.
+ *  - En cas d'échec de création du sujet de commentaires, une deuxième recherche par titre est tentée.
+ *
+ *  EXTENSIONS POSSIBLES :
+ *  - Système de cache local des IDs de sujets de commentaires.
+ *  - Indicateur du nombre de commentaires déjà postés pour chaque message (avec batching).
+ *  - Paramétrage avancé (labels, sélecteurs de posts) via un objet global ou un panneau d'options.
+ *
+ *  (Documentation ajoutée le 2025‑08‑26)
+ * =============================================================
+ */
 
 /**
- * CONFIG
+ * CONFIGURATION PRINCIPALE
+ * mode :
+ *   - "single_topic" : tous les commentaires vont dans un sujet unique (CFG.single_topic_id)
+ *   - "per_topic"    : un sujet de commentaires distinct est créé / retrouvé pour chaque RP.
+ * comments_forum_id : ID du forum où stocker/chercher les sujets de commentaires (mode per_topic).
+ * single_topic_id   : ID du sujet unique (mode single_topic).
+ * use_overlay       : true => popup interne ; false => redirection éditeur natif.
+ * button_label/class: aspects UI pour le bouton injecté.
+ * comment_title_template(topic) : génère un titre déterministe pour retrouver le sujet.
+ * new_thread_intro(rpTopic)     : contenu initial inséré lors de la création d'un nouveau sujet commentaire.
  */
 const CFG = {
     // Mode de routage des commentaires
@@ -23,21 +74,45 @@ const CFG = {
     button_class: "mrp-comment-btn",
 
     // Titres déterministes pour retrouver le sujet de commentaires d’un RP
-    comment_title_template: (topic) =>
-        `[Commentaires] t:${topic.id} • ${topic.title}`,
+    comment_title_template: (topic) => `${topic.title} • Commentaires`,
 
     // Texte d’intro auto dans un nouveau sujet de commentaires
     new_thread_intro: (rpTopic) =>
         `[b]Commentaires pour ce RP[/b]\nRP : ${rpTopic.url}\n\n— Postez ici vos réactions aux messages, sans polluer le fil RP.`,
 };
 
+// Permettre des overrides runtime (ex: window.MRP_CONFIG = { use_overlay:false })
+if (window.MRP_CONFIG && typeof window.MRP_CONFIG === "object") {
+    Object.assign(CFG, window.MRP_CONFIG);
+}
+
 /**
- * Helpers Forumactif
+ * I18N minimal – possibilité d'étendre.
+ */
+const I18N = {
+    fr: {
+        comment_button: CFG.button_label || "Commenter",
+        overlay_title: "Commenter ce message",
+        cancel: "Annuler",
+        send: "Envoyer",
+        missing_post_id: "ID du message introuvable.",
+        posted_toast: "Commentaire publié !",
+    },
+};
+const lang = "fr"; // futur: détection navigator.language
+const T = (k) => (I18N[lang] && I18N[lang][k]) || k;
+
+/**
+ * HELPERS DOM / CONTEXTE FORUMACTIF
+ * Sélecteurs pratiques ($, $$) + extraction contexte de page + utilitaires posts.
  */
 const $ = (sel, ctx = document) => ctx.querySelector(sel);
 const $$ = (sel, ctx = document) => Array.from(ctx.querySelectorAll(sel));
 
-// Récupération du contexte de page (Forumactif)
+/**
+ * Récupère informations de contexte sur une page de sujet / forum.
+ * @returns {{forumId:string|null, topicId:string|null, title:string, url:string}}
+ */
 function getPageContext() {
     // T = id du topic, F = id du forum, ancre message #pID
     const u = new URL(location.href);
@@ -48,7 +123,12 @@ function getPageContext() {
     return { forumId, topicId, title, url };
 }
 
-// ID de message depuis le DOM post (ModernBB/Phpbb2/Phpbb3 varient un peu)
+/**
+ * Extrait l'ID numérique d'un message à partir de son élément DOM.
+ * Gère différentes variantes de thèmes / structures (id="p123", ancres internes, data-post-id).
+ * @param {HTMLElement} postEl
+ * @returns {string|null}
+ */
 function getPostIdFromNode(postEl) {
     // Beaucoup de thèmes utilisent id="p12345"
     const idAttr = postEl.getAttribute("id") || "";
@@ -65,7 +145,12 @@ function getPostIdFromNode(postEl) {
     return postEl.dataset.postId || null;
 }
 
-// Lien propre vers un message
+/**
+ * Construit un permalink canonique vers un message précis.
+ * @param {string} topicUrl URL du sujet courant (peut contenir un hash).
+ * @param {string|number} postId ID du message (numérique sans le préfixe p).
+ * @returns {string}
+ */
 function buildPermalink(topicUrl, postId) {
     // Normaliser l’URL canonical du sujet (enlever ?view=newest etc.)
     const clean = topicUrl.split("#")[0];
@@ -73,7 +158,10 @@ function buildPermalink(topicUrl, postId) {
 }
 
 /**
- * UI Overlay minimaliste
+ * Crée et affiche un overlay minimaliste avec textarea et boutons.
+ * @param {Object} params
+ * @param {string} [params.title]
+ * @param {(body:string)=>Promise<void>|void} params.onSubmit Callback asynchrone déclenchée lors de l'envoi.
  */
 function openOverlay({ title = "Commenter ce message", onSubmit }) {
     const wrap = document.createElement("div");
@@ -86,17 +174,22 @@ function openOverlay({ title = "Commenter ce message", onSubmit }) {
     background: var(--fa-bg, #fff); color: inherit; width: min(680px, 100%);
     border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.2); padding: 16px; max-height: 80vh; display:flex; flex-direction:column; gap:12px;
   `;
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true");
+    card.setAttribute("aria-label", title);
     card.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-      <h3 style="margin:0;font-size:1.1rem">${title}</h3>
-      <button type="button" data-close style="background:transparent;border:none;font-size:20px;cursor:pointer">✕</button>
-    </div>
-    <textarea data-body rows="8" style="width:100%;resize:vertical"></textarea>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button type="button" data-cancel>Annuler</button>
-      <button type="button" data-send style="padding:.5rem .8rem;border-radius:8px;background:#0ea5e9;color:white;border:none;cursor:pointer">Envoyer</button>
-    </div>
-  `;
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+            <h3 style="margin:0;font-size:1.1rem">${title}</h3>
+            <button type="button" data-close aria-label="Close" style="background:transparent;border:none;font-size:20px;cursor:pointer">✕</button>
+        </div>
+        <textarea data-body rows="8" style="width:100%;resize:vertical" aria-label="Comment"></textarea>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button type="button" data-cancel>${T("cancel")}</button>
+            <button type="button" data-send style="padding:.5rem .8rem;border-radius:8px;background:#0ea5e9;color:white;border:none;cursor:pointer">${T(
+                "send"
+            )}</button>
+        </div>
+    `;
     wrap.appendChild(card);
     document.body.appendChild(wrap);
 
@@ -113,10 +206,29 @@ function openOverlay({ title = "Commenter ce message", onSubmit }) {
             alert(e?.message || e);
         }
     };
+    // focus management & ESC
+    const textarea = card.querySelector("[data-body]");
+    textarea.focus();
+    const escListener = (ev) => {
+        if (ev.key === "Escape") {
+            close();
+            document.removeEventListener("keydown", escListener);
+        }
+    };
+    document.addEventListener("keydown", escListener);
 }
 
+/**
+ * Couche API encapsulant les appels Moderactor nécessaires : création de sujet, réponse, recherche.
+ * NOTE: suppose la présence globale de `window.Moderactor` avec les méthodes forum()/topic().
+ */
 const API = {
-    // Créer un sujet dans un forum
+    /**
+     * Crée un nouveau sujet dans un forum.
+     * @param {{forumId:number|string, subject:string, message:string}} payload
+     * @returns {Promise<{id:number, url:string|null, title:string}>}
+     * @throws {Error} si le sujet ne peut pas être retrouvé après tentative de création.
+     */
     async createTopic({ forumId, subject, message }) {
         // 1) POST de création
         const [res] = await Moderactor.forum(forumId).post({
@@ -183,7 +295,11 @@ const API = {
         throw new Error("Sujet de commentaires non retrouvé après création.");
     },
 
-    // Répondre dans un sujet
+    /**
+     * Poste une réponse dans un sujet existant.
+     * @param {{topicId:number|string, message:string}} payload
+     * @returns {Promise<any>}
+     */
     async reply({ topicId, message }) {
         if (window.Moderactor) {
             // Ex: Moderactor.post([topicId]).reply({ message })
@@ -192,7 +308,12 @@ const API = {
         throw new Error("Moderactor.post() indisponible: adapte API.reply()");
     },
 
-    // Lister / trouver un topic par titre dans un forum (pour éviter les requêtes lourdes côté client, utilise un helper Moderactor si tu l’as)
+    /**
+     * Recherche un sujet par titre exact dans un forum.
+     * (Utilise si possible une méthode Moderactor côté bridge, sinon fallback HTML.)
+     * @param {{forumId:number|string, title:string}} params
+     * @returns {Promise<{id:string, url:string, title:string}|null>}
+     */
     async findTopicByTitle({ forumId, title }) {
         if (window.Moderactor?.forum) {
             // Idéalement : Moderactor.forum([forumId]).findByTitle(title)
@@ -220,6 +341,12 @@ const API = {
     },
 };
 
+/**
+ * Normalise un objet de retour de création (bridge Moderactor) vers {id,url,title}.
+ * @param {any} res Réponse brute du bridge.
+ * @param {string} fallbackTitle Titre utilisé si absent.
+ * @returns {{id:number, url:string|null, title:string|null}|null}
+ */
 function normalizeCreatedTopicFromBridge(res, fallbackTitle) {
     if (!res) return null;
 
@@ -251,6 +378,11 @@ function normalizeCreatedTopicFromBridge(res, fallbackTitle) {
     return t || null;
 }
 
+/**
+ * Tente de retrouver un sujet de commentaires via la page de tag #t{topicId}.
+ * @param {{topicId:number|string, matchText?:RegExp}} params
+ * @returns {Promise<{id:number, url:string, title?:string}|null>}
+ */
 async function findCommentThreadViaTag({ topicId, matchText = /comment/i }) {
     // /tags/t123  → page listant les sujets taggés #t123
     const resp = await Moderactor.adapter.get(`/tags/t${topicId}`);
@@ -269,38 +401,62 @@ async function findCommentThreadViaTag({ topicId, matchText = /comment/i }) {
 }
 
 /**
- * Logique "par sujet RP" : garantir/obtenir le sujet de commentaires
+ * Garantit l'existence (ou retrouve) le sujet de commentaires pour un RP courant.
+ * MODE per_topic uniquement. Crée le sujet si manquant.
+ * NOTE: BUG POTENTIEL → utilisation de API.findCommentThreadViaTag inexistant.
+ * @param {{id:string, forumId:string, title:string, url:string}} rp
+ * @returns {Promise<{id:number|string, url:string|null, title:string}>}
  */
 async function ensureCommentThread(rp) {
     const title = CFG.comment_title_template(rp);
-    // 1) Chercher
-    const existing = await API.findTopicByTitle({
-        forumId: CFG.comments_forum_id,
-        title,
-    });
-    if (existing) return existing;
+    // 0) Cache mémoire pour éviter re‑créations simultanées
+    if (!ensureCommentThread._cache) ensureCommentThread._cache = new Map();
+    const cache = ensureCommentThread._cache;
+    if (cache.has(rp.id)) return cache.get(rp.id);
 
-    // 2) Créer
-    const created = await API.createTopic({
-        forumId: CFG.comments_forum_id,
-        subject: title,
-        message: CFG.new_thread_intro(rp),
-    });
-    // Normalise le retour : { id, url, title }
-    if (!created?.id) {
-        // Si Moderactor renvoie autre chose, force une 2e passe de recherche
+    const work = (async () => {
+        // 1) Chercher via tag (si accessible)
+        try {
+            const viaTag = await findCommentThreadViaTag({ topicId: rp.id });
+            if (viaTag?.id) return viaTag;
+        } catch {}
+        // 2) Chercher via titre déterministe
+        const existing = await API.findTopicByTitle({
+            forumId: CFG.comments_forum_id,
+            title,
+        });
+        if (existing) return existing;
+        // 3) Créer
+        const created = await API.createTopic({
+            forumId: CFG.comments_forum_id,
+            subject: title,
+            message: CFG.new_thread_intro(rp),
+        });
+        if (created?.id) return created;
+        // 4) Re‑cherche finale
         const again = await API.findTopicByTitle({
             forumId: CFG.comments_forum_id,
             title,
         });
         if (again) return again;
         throw new Error("Sujet de commentaires non retrouvé après création.");
+    })();
+
+    cache.set(rp.id, work);
+    try {
+        const result = await work;
+        cache.set(rp.id, result); // remplacer la Promise par la valeur
+        return result;
+    } catch (e) {
+        cache.delete(rp.id);
+        throw e;
     }
-    return created;
 }
 
 /**
- * Poster un commentaire (inclut auto-lien vers le message RP).
+ * Poste un commentaire (ajoute le lien vers le message RP ciblé).
+ * @param {{rp:{id:string,forumId:string,title:string,url:string}, postPermalink:string, body:string}} params
+ * @returns {Promise<any>}
  */
 async function postComment({ rp, postPermalink, body }) {
     if (CFG.mode === "single_topic") {
@@ -319,7 +475,9 @@ async function postComment({ rp, postPermalink, body }) {
 }
 
 /**
- * Intégration UI : un bouton sous chaque message
+ * Injecte les boutons d'action sous chaque message du sujet courant.
+ * - Récupère le contexte (topicId) puis parcourt les conteneurs posts.
+ * - Évite la duplication si déjà monté.
  */
 function mountButtons() {
     const ctx = getPageContext();
@@ -335,11 +493,12 @@ function mountButtons() {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = CFG.button_class;
-        btn.textContent = CFG.button_label;
+        btn.textContent = T("comment_button");
         btn.style.cssText = `
       margin-left: .5rem; padding: .25rem .5rem; border-radius: 8px;
       background: #e2e8f0; border: 1px solid #cbd5e1; cursor: pointer; font-size: .85rem;
     `;
+        btn.setAttribute("aria-label", T("comment_button"));
 
         // Où insérer ? En bas du post, près des actions
         const actions = node.querySelector(
@@ -349,7 +508,7 @@ function mountButtons() {
 
         btn.addEventListener("click", async () => {
             const postId = getPostIdFromNode(node);
-            if (!postId) return alert("ID du message introuvable.");
+            if (!postId) return alert(T("missing_post_id"));
             const permalink = buildPermalink(location.href, postId);
 
             const rp = {
@@ -376,13 +535,13 @@ function mountButtons() {
 
             // OPTION POPUP : composer et envoyer sans quitter la page
             openOverlay({
-                title: "Commenter ce message",
+                title: T("overlay_title"),
                 onSubmit: async (body) => {
                     await postComment({ rp, postPermalink: permalink, body });
                     // Optionnel : toast
                     try {
                         // Si tu as une UI Moderactor de toast
-                        window.Moderactor?.ui?.toast?.("Commentaire publié !");
+                        window.Moderactor?.ui?.toast?.(T("posted_toast"));
                     } catch (_) {}
                 },
             });
@@ -391,9 +550,32 @@ function mountButtons() {
 }
 
 /**
- * (Avancé) — Compteur de commentaires par message
- * Sans BDD, on peut approximer en comptant les posts dans le thread qui contiennent le lien #pID.
- * ATTENTION : ça veut dire 1 requête par post => à garder pour une version future avec batching.
+ * Parse un href /t1234-... et renvoie {id, url, title?}
+ * @param {string} href
+ * @param {HTMLAnchorElement} [a]
+ * @returns {{id:number,url:string,title?:string}|null}
+ */
+function topicFromHref(href, a) {
+    if (!href) return null;
+    const m = href.match(/\/t(\d+)-/);
+    if (!m) return null;
+    return {
+        id: Number(m[1]),
+        url: href,
+        title: a?.textContent?.trim() || null,
+    };
+}
+
+/**
+ * (FONCTION EXPÉRIMENTALE) Compte approximativement les commentaires contenant le permalink.
+ * Stratégie : charge la première page du sujet de commentaires et compte les occurrences textuelles.
+ * LIMITES :
+ *   - Faux positifs si plusieurs messages collent le même lien.
+ *   - Incomplet si >1 page ou pagination.
+ *   - Coût = 1 requête par message (DOIT être batché/optimisé si activé).
+ * @param {string} permalink Lien (#pID) du message RP.
+ * @param {{id:string,forumId:string,title:string,url:string}} rp Contexte du RP.
+ * @returns {Promise<number>} Nombre estimé de commentaires.
  */
 async function fetchCommentCountFor(permalink, rp) {
     // Idée : charger la première page du sujet de commentaires et compter
@@ -420,10 +602,13 @@ async function fetchCommentCountFor(permalink, rp) {
 }
 
 /**
- * Bootstrap
+ * Point d'entrée : attend le DOM prêt puis monte les boutons.
  */
 (function init() {
     document.addEventListener("DOMContentLoaded", mountButtons, {
         once: true,
     });
 })();
+
+// Optionnel: exposer certaines fonctions pour debug (désactiver en prod si besoin)
+// window.__MRP_DEBUG = { getPageContext, ensureCommentThread, postComment };
