@@ -6,7 +6,7 @@
     "description": "Modern Forumactif moderation plugin (embedded script).",
     "scripts": {
         "build": "rollup -c",
-        "dev": "concurrently -k \"rollup -c -w\" \"http-server dist -p 8080 -c-1\"",
+        "dev": "concurrently -k \"rollup -c -w\" \"http-server dist -c-1\"",
         "serve": "http-server dist -p 8080 -c-1",
         "clean": "rimraf dist"
     },
