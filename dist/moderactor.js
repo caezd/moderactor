@@ -417,7 +417,7 @@ var Moderactor = (function () {
     }
 
     class ForumResource extends BaseResource {
-        async post(input) {
+        async post(input, options = {}) {
             const { subject, message, notify = 0 } = input || {};
             if (!subject || !message)
                 throw new Error("Forum.post: subject et message sont requis");
@@ -430,6 +430,7 @@ var Moderactor = (function () {
                         subject,
                         message,
                         notify,
+                        ...options,
                     })
                     .then((r) => this.adapter.bridge(r))
             );
@@ -438,12 +439,19 @@ var Moderactor = (function () {
     }
 
     class TopicResource extends BaseResource {
-        async post(input) {
+        async post(input, options = {}) {
             const { message, notify = 0 } = input || {};
             if (!message) throw new Error("Topic.post: message est requis");
             const tasks = this.ids.map((t) =>
                 this.adapter
-                    .post("/post", { post: 1, mode: "reply", t, message, notify })
+                    .post("/post", {
+                        post: 1,
+                        mode: "reply",
+                        t,
+                        message,
+                        notify,
+                        ...options,
+                    })
                     .then((r) => this.adapter.bridge(r))
             );
             return this._all(tasks);

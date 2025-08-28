@@ -1,7 +1,7 @@
 import { BaseResource } from "./_base.js";
 
 export default class ForumResource extends BaseResource {
-    async post(input) {
+    async post(input, options = {}) {
         const { subject, message, notify = 0 } = input || {};
         if (!subject || !message)
             throw new Error("Forum.post: subject et message sont requis");
@@ -14,6 +14,7 @@ export default class ForumResource extends BaseResource {
                     subject,
                     message,
                     notify,
+                    ...options,
                 })
                 .then((r) => this.adapter.bridge(r))
         );

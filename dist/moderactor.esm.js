@@ -414,7 +414,7 @@ class BaseResource {
 }
 
 class ForumResource extends BaseResource {
-    async post(input) {
+    async post(input, options = {}) {
         const { subject, message, notify = 0 } = input || {};
         if (!subject || !message)
             throw new Error("Forum.post: subject et message sont requis");
@@ -427,6 +427,7 @@ class ForumResource extends BaseResource {
                     subject,
                     message,
                     notify,
+                    ...options,
                 })
                 .then((r) => this.adapter.bridge(r))
         );
@@ -435,12 +436,19 @@ class ForumResource extends BaseResource {
 }
 
 class TopicResource extends BaseResource {
-    async post(input) {
+    async post(input, options = {}) {
         const { message, notify = 0 } = input || {};
         if (!message) throw new Error("Topic.post: message est requis");
         const tasks = this.ids.map((t) =>
             this.adapter
-                .post("/post", { post: 1, mode: "reply", t, message, notify })
+                .post("/post", {
+                    post: 1,
+                    mode: "reply",
+                    t,
+                    message,
+                    notify,
+                    ...options,
+                })
                 .then((r) => this.adapter.bridge(r))
         );
         return this._all(tasks);

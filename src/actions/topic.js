@@ -1,12 +1,19 @@
 import { BaseResource } from "./_base.js";
 
 export default class TopicResource extends BaseResource {
-    async post(input) {
+    async post(input, options = {}) {
         const { message, notify = 0 } = input || {};
         if (!message) throw new Error("Topic.post: message est requis");
         const tasks = this.ids.map((t) =>
             this.adapter
-                .post("/post", { post: 1, mode: "reply", t, message, notify })
+                .post("/post", {
+                    post: 1,
+                    mode: "reply",
+                    t,
+                    message,
+                    notify,
+                    ...options,
+                })
                 .then((r) => this.adapter.bridge(r))
         );
         return this._all(tasks);
